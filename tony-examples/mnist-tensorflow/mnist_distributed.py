@@ -13,6 +13,19 @@
 # limitations under the License.
 # ==============================================================================
 
+# Reference
+# 한국어, 나름 비슷, https://excelsior-cjh.tistory.com/162
+# 영어로 된 앞 부분 개념, https://databricks.com/tensorflow/distributed-computing-with-tensorflow
+# 영어로 된 앞 부분 개념, 좀 더 자세하고 친절, https://medium.com/@alienrobot/understanding-distributed-tensorflow-2cdbd9881d9b
+# 제일 자세한 영어 ppt, https://www.math.purdue.edu/~nwinovic/slides/Getting_Started_with_TensorFlow_II.pdf
+
+# keywords
+# parameter servers : worker랑 똑같음. 보통 worker에 필요한 변수 저장하는 cpu임, 가중치 같은 거, 태스크임 이것도
+# workers : 계산하는 친구
+# forward pass : worker가 ps로부터 변수를 가져오는 것
+# backward pass : worker가 계산해서 ps에게 새로운 가중치를 주는 것
+# chief : checkpoints를 핸들링하는 태스크, 모델 저장 등 
+
 """A deep MNIST classifier using convolutional layers.
 
 This example was adapted from
@@ -157,7 +170,8 @@ def create_model():
         cross_entropy = tf.losses.sparse_softmax_cross_entropy(labels=y_,
                                                                logits=y_conv)
         cross_entropy = tf.reduce_mean(cross_entropy)
-
+    
+    # global step tensor초기화, optimizer에서 
     global_step = tf.train.get_or_create_global_step()
     with tf.name_scope('adam_optimizer'):
         train_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy,
@@ -187,23 +201,35 @@ def start_tensorboard(logdir):
 def main(_):
     logging.getLogger().setLevel(logging.INFO)
 
+    # CLUSTER_SPEC이라는 환경변수를 통해 ps_hosts, worker_hosts에 파라미터 서버와 워커 정보를 저장
     cluster_spec_str = os.environ["CLUSTER_SPEC"]
     cluster_spec = json.loads(cluster_spec_str)
     ps_hosts = cluster_spec['ps']
     worker_hosts = cluster_spec['worker']
-
+    
+    # 핵심이 되는 부분. 우리가 사용할 파라미터 서버와 워커를 정의하는 부분. 음 얼마나 있는지 내가 알 길이 없네!
+    # 저장된 정보를 바탕으로 클러스터 생성, https://www.tensorflow.org/api_docs/python/tf/train/ClusterSpec
     # Create a cluster from the parameter server and worker hosts.
     cluster = tf.train.ClusterSpec({"ps": ps_hosts, "worker": worker_hosts})
-
+    
     # Create and start a server for the local task.
+    # job name은 worker거나 server.
+    # server는 각 ps와 worker 모두 정의해야 함!
+    # 태스크는 예시로 2개의 ps와 5개의 worker로 구성. ps와 worker의 역할을 job이라고 함
+    # 각 태스크는 텐서플로 서버를 실행하며, 계산을 위해 자원을 사용하고 병렬처리를 효율적으로 하도록 클러스터 내 다른 태스크와 통신을 위해 server running
+    # 워커 노드에 클러스터를 정의, 서버도 정의
     job_name = os.environ["JOB_NAME"]
     task_index = int(os.environ["TASK_INDEX"])
     server = tf.train.Server(cluster, job_name=job_name, task_index=task_index)
 
+    # parameter server면 join만 해줌
+    # ps에는 모델(연산 그래프) 작성 안 함, 대신 프로세스가 종료되지 않도록 server.join()으로 병렬 계산이 수행되는 동안 ps가 종료되지 않도록 함
     if job_name == "ps":
         server.join()
+    # worker면 task index에 따라서 별개의 디바이스에서 태스크 수행
     elif job_name == "worker":
         # Create our model graph. Assigns ops to the local worker by default.
+        # replica를 통해 각 태스크에 모델을 복제. 인자로 클러스터 태스크 설정
         with tf.device(tf.train.replica_device_setter(
                 worker_device="/job:worker/task:%d" % task_index,
                 cluster=cluster)):
@@ -211,10 +237,12 @@ def main(_):
             merged = create_model()
 
         if task_index is 0:  # chief worker
+          # chief worker은 session을 준비한다. 그동안 다른 워커는 준비될 때까지 기다림
             tf.gfile.MakeDirs(FLAGS.working_dir)
             start_tensorboard(FLAGS.working_dir)
 
         # The StopAtStepHook handles stopping after running given steps.
+        # 특정 스텝이 지나면 training을 멈추게 하는 일종의 플래그 같은 친구네
         hooks = [tf.train.StopAtStepHook(num_steps=FLAGS.steps)]
 
         # Filter all connections except that between ps and this worker to
@@ -223,7 +251,12 @@ def main(_):
         # communicate.
         config_proto = tf.ConfigProto(
             device_filters=['/job:ps', '/job:worker/task:%d' % task_index])
-
+        
+        # is_chief : 메인 노드인가? 얘가 모든 클러스터를 관리하는 대장이야
+        # 초기화, 리커버리, 훅을 조절하는 session과 같은 object
+        # 훅 사용, 에러 발생하면 세션 복원, 변수 초기화 편리하게 해줌
+        # 체크포인트와 서머리 저장을 자동화시키는 세션 정의, 분산된 장치에서 학습을 용이하게 해주는 세션 
+        # working_dir에 저장, 한 번 모니터 세션이 초기화되면 그래프는 동결돼서 못 수정함, 그래서 모델이랑 글로벌 스텝 먼저 정의해야 함
         with tf.train.MonitoredTrainingSession(master=server.target,
                                                is_chief=(task_index == 0),
                                                checkpoint_dir=FLAGS.working_dir,
@@ -236,6 +269,7 @@ def main(_):
             # Train
             logging.info('Starting training')
             i = 0
+            # 세션 종료 조건 전까지 계속 되어야 함, hook이 이 상태를 결정함, 어떻게? run_context.request_stop()메소드를 통해 중지
             while not sess.should_stop():
                 batch = mnist.train.next_batch(FLAGS.batch_size)
                 if i % 100 == 0:
