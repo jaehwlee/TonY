@@ -171,7 +171,7 @@ def create_model():
                                                                logits=y_conv)
         cross_entropy = tf.reduce_mean(cross_entropy)
     
-    # global step tensor초기화, optimizer에서 
+    # global step tensor초기화, optimizer에서 값을 업데이트할 때마다 하나씩 증가함
     global_step = tf.train.get_or_create_global_step()
     with tf.name_scope('adam_optimizer'):
         train_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy,
@@ -226,7 +226,7 @@ def main(_):
     # ps에는 모델(연산 그래프) 작성 안 함, 대신 프로세스가 종료되지 않도록 server.join()으로 병렬 계산이 수행되는 동안 ps가 종료되지 않도록 함
     if job_name == "ps":
         server.join()
-    # worker면 task index에 따라서 별개의 디바이스에서 태스크 수행
+    # worker면 task index에 따라서 별개의 디바이스에서 태스크 수행할 준비 (모델 생성)
     elif job_name == "worker":
         # Create our model graph. Assigns ops to the local worker by default.
         # replica를 통해 각 태스크에 모델을 복제. 인자로 클러스터 태스크 설정
@@ -249,10 +249,12 @@ def main(_):
         # avoid hanging issues when one worker finishes. We are using
         # asynchronous training so there is no need for the workers to
         # communicate.
+        # 세션은 device_filters가 아닌 디바이스들은 다 무시
         config_proto = tf.ConfigProto(
             device_filters=['/job:ps', '/job:worker/task:%d' % task_index])
         
         # is_chief : 메인 노드인가? 얘가 모든 클러스터를 관리하는 대장이야
+        # 세션이란 실제로 계산이 이뤄지면서 그래프가 동작하는 친구, 근데 이 세션은 특이한 게 분산을 지원하는 세션인 거지
         # 초기화, 리커버리, 훅을 조절하는 session과 같은 object
         # 훅 사용, 에러 발생하면 세션 복원, 변수 초기화 편리하게 해줌
         # 체크포인트와 서머리 저장을 자동화시키는 세션 정의, 분산된 장치에서 학습을 용이하게 해주는 세션 
