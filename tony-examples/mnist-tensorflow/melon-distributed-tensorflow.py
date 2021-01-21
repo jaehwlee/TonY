@@ -113,9 +113,12 @@ def main(_):
     print(cluster_spec)
     ps_hosts = cluster_spec['ps']
     worker_hosts = cluster_spec['worker']
-
+    
+    # 사용할 parameter sever와 worker 정의
     cluster = tf.train.ClusterSpec({'ps': ps_hosts, 'worker': worker_hosts})
 
+    # job_name은 ps나 worker 둘 중에 하나
+    # task_index는 0부터 시작
     job_name = os.environ["JOB_NAME"]
     task_index = int(os.environ["TASK_INDEX"])
     server_config = None
@@ -125,15 +128,20 @@ def main(_):
     else:
         server_config = tf.ConfigProto()
         server_config.gpu_options.allow_growth = True
+        
+    # worker, ps 모두 클러스터 내 다른 태스크와 통신을 위해 각각의 tensorflow server를 실행
     server = tf.train.Server(cluster, config=server_config, job_name=job_name, task_index=task_index)
-
+    
+    # ps는 연산 그래프 작성 안 함, 대신 계산이 수행되는 동안 ps가 종료되지 않도록 함
     if job_name == "ps":
         server.join()
+    # worker면 task index에 따라서 별개의 device에서 task를 수행할 준비(모델 생성)
     elif job_name == "worker":
         with tf.device(tf.train.replica_device_setter(worker_device="/job:worker/task:%d"%task_index, cluster=cluster)):
             features, labels, keep_prob, global_step, train_step, accuracy, merged = create_model()
 
             logging.info('==============================in main4')
+            # task index가 0이면 chief worker, working dir을 만듦
             if task_index is 0:
                 if FileSystemType == 'LUSTRE':
                     os.system('mkdir -p /mnt/lustre/'+APP_ID+'/working_dir')
@@ -146,6 +154,7 @@ def main(_):
                 logging.info('=========getcwd()'+os.getcwd())
 
             logging.info('==============================in main befor hooks')
+            # 특정 스텝이 지나면 training을 멈추게 함
             hooks = [tf.train.StopAtStepHook(num_steps=FLAGS.steps)]
             logging.info('==============================in main3==='+getpass.getuser())
 
@@ -153,7 +162,8 @@ def main(_):
             logging.info('==============================in main2')
 
             config_proto.gpu_options.allow_growth = True
-
+               
+            # 분산된 장치에서 학습을 용이하게 해주는 모니터 세션, hook을 통해 학습을 종류시키기도, 에러가 발생하면 세션 복원, 변수 초기화 등을 담당
             with tf.train.MonitoredTrainingSession(master=server.target, is_chief=(task_index==0), hooks=hooks, config=config_proto) as sess:
                 logging.info('==============================in main1')
                 if FileSystemType != 'LUSTRE':
@@ -167,6 +177,7 @@ def main(_):
                 while not sess.should_stop():
                     batch = mnist.train.next_batch(FLAGS.batch_size)
                     if i % 1000 == 0:
+                        # sess.run이 리턴하는 step은 어떤 정보를 담고 있는가?
                         step, _, train_accuracy = sess.run([global_step, train_step, accuracy], feed_dict={features: batch[0], labels: batch[1], keep_prob: 1.0})
                         logging.info('Step %d, training accuarcy: %g'%(step, train_accuracy))
                     else:
