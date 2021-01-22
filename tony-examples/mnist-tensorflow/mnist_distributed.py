@@ -242,7 +242,14 @@ def main(_):
             start_tensorboard(FLAGS.working_dir)
 
         # The StopAtStepHook handles stopping after running given steps.
+        # https://www.tensorflow.org/api_docs/python/tf/estimator/StopAtStepHook
         # 특정 스텝이 지나면 training을 멈추게 하는 일종의 플래그 같은 친구네
+        # num_steps과 last_step 둘 중에 하나가 인자로 들어가야 함
+        # num_steps를 하면 begin()이라는 메소드가 호출되고 FLAGS.steps가 300 지나야 종료되는 건데,
+        # worker마다 begin을 하는 시점이 달라, 어떤 워커는 mnist 갖고 오느라 109(글로벌)스텝에서 시작할 수도 있어.
+        # 그러면 이 워커는 409에서 종료가 되는 거고, 0번에서 begin한 애는 내가 원하는 300에서 종료하는 거지.
+        # last_step이 내가 생각하는 그거야, 늦게 시작하던 말던 글로벌이 steps에 딱 되면 둘 다 종료되는 거지.
+        # 그래서 예를 들어 300이면 0번 워커는 210번, 1번 워커는 90번 돌고 종료가 
         hooks = [tf.train.StopAtStepHook(num_steps=FLAGS.steps)]
 
         # Filter all connections except that between ps and this worker to
