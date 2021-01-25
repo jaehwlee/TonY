@@ -154,7 +154,7 @@ def main(_):
                 logging.info('=========getcwd()'+os.getcwd())
 
             logging.info('==============================in main befor hooks')
-            # 특정 스텝이 지나면 training을 멈추게 함
+            # 특정 스텝이 지나면 training을 멈추게 함, num_steps는 프로그램이 실행하고 나서부터 step만큼 지나야 되는 거고,worker가 합쳐서 step만큼 진행하고 싶으 거면 last steps를 써야 함
             hooks = [tf.train.StopAtStepHook(num_steps=FLAGS.steps)]
             logging.info('==============================in main3==='+getpass.getuser())
 
@@ -175,9 +175,10 @@ def main(_):
                 logging.info('Starting training')
                 i = 0
                 while not sess.should_stop():
+                    # next_batch의 인자로 shuffle=False를 주면 worker들이 같은 데이터를 학습하게 됨. default value는 True
                     batch = mnist.train.next_batch(FLAGS.batch_size)
                     if i % 1000 == 0:
-                        # sess.run이 리턴하는 step은 어떤 정보를 담고 있는가?
+                        # step은 global_step을 의미
                         step, _, train_accuracy = sess.run([global_step, train_step, accuracy], feed_dict={features: batch[0], labels: batch[1], keep_prob: 1.0})
                         logging.info('Step %d, training accuarcy: %g'%(step, train_accuracy))
                     else:
