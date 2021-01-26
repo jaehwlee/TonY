@@ -118,7 +118,6 @@ def main(_):
     cluster = tf.train.ClusterSpec({'ps': ps_hosts, 'worker': worker_hosts})
 
     # job_name은 ps나 worker 둘 중에 하나
-    # task_index는 0부터 시작
     job_name = os.environ["JOB_NAME"]
     task_index = int(os.environ["TASK_INDEX"])
     server_config = None
@@ -132,16 +131,16 @@ def main(_):
     # worker, ps 모두 클러스터 내 다른 태스크와 통신을 위해 각각의 tensorflow server를 실행
     server = tf.train.Server(cluster, config=server_config, job_name=job_name, task_index=task_index)
     
-    # ps는 연산 그래프 작성 안 함, 대신 계산이 수행되는 동안 ps가 종료되지 않도록 함
+    # ps는 연산 그래프 작성 안 함, 대신 계산이 수행되는 동안 ps가 종료되지 않도록 함 (listen 상태로 계속 있다고 보면 될 듯)
     if job_name == "ps":
         server.join()
-    # worker면 task index에 따라서 별개의 device에서 task를 수행할 준비(모델 생성)
+    # worker면 task index에 따라서 별개의 replica device에서 task를 수행할 준비(모델 생성)
     elif job_name == "worker":
         with tf.device(tf.train.replica_device_setter(worker_device="/job:worker/task:%d"%task_index, cluster=cluster)):
             features, labels, keep_prob, global_step, train_step, accuracy, merged = create_model()
 
             logging.info('==============================in main4')
-            # task index가 0이면 chief worker, working dir을 만듦
+            # task index가 0이면 chief worker라는 뜻, working dir을 만듦
             if task_index is 0:
                 if FileSystemType == 'LUSTRE':
                     os.system('mkdir -p /mnt/lustre/'+APP_ID+'/working_dir')
@@ -154,7 +153,10 @@ def main(_):
                 logging.info('=========getcwd()'+os.getcwd())
 
             logging.info('==============================in main befor hooks')
-            # 특정 스텝이 지나면 training을 멈추게 함, num_steps는 프로그램이 실행하고 나서부터 step만큼 지나야 되는 거고,worker가 합쳐서 step만큼 진행하고 싶으 거면 last steps를 써야 함
+            # 특정 스텝이 지나면 training을 멈추게 함
+            # parameters
+            # num_steps : 프로그램이 실행하고 나서부터 step만큼 지나야 종료, 즉 chief는 딱 맞춰 끝나지만 나머지는 스텝이 글로벌 스텝이 FLAGS.steps보다 넘어가는 상황 발생
+            # last step : worker 모두가 합쳐서 step만큼 진행하고 종료
             hooks = [tf.train.StopAtStepHook(num_steps=FLAGS.steps)]
             logging.info('==============================in main3==='+getpass.getuser())
 
@@ -173,6 +175,7 @@ def main(_):
                 mnist = input_data.read_data_sets(FLAGS.data_dir)
 
                 logging.info('Starting training')
+                # i는 local step
                 i = 0
                 while not sess.should_stop():
                     # next_batch의 인자로 shuffle=False를 주면 worker들이 같은 데이터를 학습하게 됨. default value는 True
